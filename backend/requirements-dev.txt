@@ -1,0 +1,5 @@
+# Tools needed to check the code (linting + tests), but NOT to run the app.
+# Keeping them separate from requirements.txt keeps the Docker image smaller.
+-r requirements.txt
+pytest==8.3.3
+ruff==0.8.4

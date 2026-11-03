@@ -1,0 +1,123 @@
+# CI = Continuous Integration.
+#
+# Plain-English version: every time you push code or open a pull request, GitHub
+# rents a fresh, empty computer for a few minutes, copies your code onto it, and
+# runs the checks below. If any check fails, the PR gets a red X and you find out
+# BEFORE the broken code reaches main. It never says "but it works on my machine"
+# because the machine is brand new every time.
+#
+# This file is called a "workflow". GitHub reads every file in .github/workflows/.
+
+name: CI
+
+# WHEN to run.
+on:
+  push:
+    branches: [main]   # every time code lands on main
+  pull_request:        # every time a PR is opened or updated
+
+# Security: the automatic token GitHub gives this workflow can only READ the repo.
+# (Least privilege: give a job only the powers it needs. It needs no more.)
+permissions:
+  contents: read
+
+# If you push twice quickly, cancel the older run instead of wasting minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # JOB 1: backend. Lint + test the Python code.
+  # Jobs run in parallel (side by side, on separate computers) unless told to wait.
+  # ---------------------------------------------------------------------------
+  backend:
+    runs-on: ubuntu-latest   # the rented computer: a fresh Ubuntu Linux machine
+    defaults:
+      run:
+        working-directory: backend   # every `run:` below starts inside backend/
+    steps:
+      # Copy the repo's code onto the rented machine. Without this it's empty.
+      - uses: actions/checkout@v4
+
+      # Install Python 3.11 (same version as backend/Dockerfile).
+      # cache: pip remembers downloaded packages between runs, so it's faster.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # LINT = read the code without running it and flag mistakes (unused
+      # imports, undefined names, syntax errors). Rules live in backend/ruff.toml.
+      - name: Lint (ruff)
+        run: ruff check .
+
+      # TEST = actually run the code and check it behaves. Right now there's one
+      # smoke test ("does /health answer?"). Add more in backend/tests/.
+      - name: Test (pytest)
+        run: pytest
+
+  # ---------------------------------------------------------------------------
+  # JOB 2: frontend. Lint + build the React app.
+  # ---------------------------------------------------------------------------
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # `npm ci` installs EXACTLY what package-lock.json says (unlike `npm install`,
+      # which may pick newer versions). Same code in = same result out.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (eslint)
+        run: npm run lint
+
+      # BUILD = turn the React source into the static files a browser can load.
+      # If the build fails, the app can't ship.
+      - name: Build (vite)
+        run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # JOB 3: docker. Prove both Docker images still build.
+  # `needs` = wait until backend AND frontend passed. No point building images
+  # of code that already failed its checks.
+  # ---------------------------------------------------------------------------
+  docker:
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # A "matrix" runs the same steps once per value: one run for backend,
+        # one for frontend. Two jobs from one block of YAML.
+        service: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Buildx is Docker's modern build engine. It enables layer caching below.
+      - uses: docker/setup-buildx-action@v3
+
+      # Build the image from ./backend/Dockerfile or ./frontend/Dockerfile.
+      # push: false = we only check that it BUILDS. We don't publish it anywhere yet.
+      # cache-*: gha = reuse unchanged Docker layers from the last run, so a
+      # build with no dependency changes takes seconds instead of minutes.
+      - name: Build ${{ matrix.service }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
